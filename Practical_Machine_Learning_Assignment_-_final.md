@@ -1,0 +1,295 @@
+# Prediction Assignment - Coursera Practical Machine Learning course
+Bela Czeiner  
+Monday, June 06, 2016  
+  
+# Executive Summary
+
+After data clean-up and preparation two model has been trained and tested. One with Random Forest and another with Linear Discriminant Analysis model. We can see that the cross validation accuracy is 99.8% and out-of-sample error is only 0.2% for the Random Forest model. This is significantly better than it is for the second model.
+As the Random Forest model performs so well we wont need further optimisation of the variables or the models and we expect that all or nearly all of the 20 test samples will be correctly classified.
+
+*Our predicted answers:*
+
+    1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 
+    B  A  B  A  A  E  D  B  A  A  B  C  B  A  E  E  A  B  B  B 
+    Levels: A B C D E
+
+# Background from assignment description
+
+"Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: (http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset)."
+
+# Data source
+
+Training and test data downloaded on the 9th May 2016) to the working directory from:
+  https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+  https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+Outcome variable is labelled "classe"". It is a factor variable with 5 levels, describing the manner the subjects performed the "Unilateral Dumbbell Biceps Curl" excercise. The valuses are representing the following:
+
+- A : exactly according to the specification
+- B : throwing the elbows to the front
+- C : lifting the dumbbell only halfway
+- D : lowering the dumbbell only halfway
+- E : throwing the hips to the front
+
+# Pre-processing and Exploratory Data Analysis
+
+Load required libraries and load data
+
+
+```r
+    library(caret)
+    library(RANN)
+    library(MASS)
+    library(randomForest)
+    
+    # setwd("D:\\Practical Machine Learning\\Assignment\\")
+    # getwd()
+    
+    pmltrain <- read.csv('pml-training.csv')
+    pmltest <- read.csv('pml-testing.csv')
+```
+
+Review of the remainig 37 factor columns indicate that most of them should be numeric but classed as Factor by read.csv due to "#DIV/0!" values in various records. Consequently, after replacing "#DIV/0!" with NA they can be changed back to numeric. Two other variables will be removed: `cvtd_timestamp` and `new_window` does not provide meaningful information for the analysis.
+
+
+```r
+    numcols <- which(lapply(pmltrain,class) %in% c("integer","numeric"))
+    checkcols <- pmltrain[,-numcols]
+    #summary(checkcols)
+    str(checkcols[,1:5])
+```
+
+```
+    ## 'data.frame':	19622 obs. of  5 variables:
+    ##  $ user_name          : Factor w/ 6 levels "adelmo","carlitos",..: 2 2 2 2 2 2 2 2 2 2 ...
+    ##  $ cvtd_timestamp     : Factor w/ 20 levels "02/12/2011 13:32",..: 9 9 9 9 9 9 9 9 9 9 ...
+    ##  $ new_window         : Factor w/ 2 levels "no","yes": 1 1 1 1 1 1 1 1 1 1 ...
+    ##  $ kurtosis_roll_belt : Factor w/ 397 levels "","-0.016850",..: 1 1 1 1 1 1 1 1 1 1 ...
+    ##  $ kurtosis_picth_belt: Factor w/ 317 levels "","-0.021887",..: 1 1 1 1 1 1 1 1 1 1 ...
+```
+
+```r
+    # To make it easier the data sources are reloaded with 'stringsAsFactors = FALSE'
+    pmltrain <- read.csv('pml-training.csv', stringsAsFactors = FALSE)
+    pmltest <- read.csv('pml-testing.csv', stringsAsFactors = FALSE)
+    pmltrain <- pmltrain[,-1]
+    pmltest <- pmltest[,-1]
+    
+    pmltrain[pmltrain == "#DIV/0!"] <- NA
+    pmltest[pmltest == "#DIV/0!"] <- NA
+    
+    # 'as.character' left in the apply in to remind that it would be required for factors
+    # Coerced NA values are expected and suppressd at this point.
+    pmltrain[,-c(1,length(pmltrain))] <- apply(pmltrain[,-c(1,length(pmltrain))]
+                              , 2, function(x) as.numeric(as.character(x)))
+    pmltest[,-1] <- apply(pmltest[,-1], 2, function(x) as.numeric(as.character(x)))
+    
+    # remove unwanted columns and change user_name and classe to factor
+    pmltrain <- pmltrain[,-c(4,5)]
+    pmltest <- pmltest[,-c(4,5)]
+    pmltrain$user_name <- as.factor(pmltrain$user_name)
+    pmltest$user_name <- as.factor(pmltest$user_name)
+    pmltrain$classe <- as.factor(pmltrain$classe)
+    #str(pmltest)
+```
+
+Simple plot of the (traninig) data by 'classe' variable
+
+
+```r
+    plot(pmltrain$classe, main="Records of correct (A) and incorredt (B,C,D,E) barbell lifts in training data set", xlab="", ylab="Frequency")
+```
+
+![](./Practical_Machine_Learning_Assignment_-_final_files/figure-html/unnamed-chunk-3-1.png)<!-- -->
+
+Create training, test and validation sets as the test set is alredy provided in a separate csv file.
+
+
+```r
+    set.seed(2016)
+    
+    train.idx <- createDataPartition(pmltrain$classe,p=.8,list=FALSE)
+    train.base <- pmltrain[train.idx,]
+    xval.base <- pmltrain[-train.idx,]
+```
+
+Review of the training data shows that a large number of columns are showing little variability. They can be removed ro increase the preformance of the predictive models with minimal loss or variability.
+It is also necessary to cater for missing values and standardising for the predictive models. We use knn imputing of missing data.
+
+
+```r
+    # Identify near zero variables (with default treshold)
+    nsv <- nearZeroVar(train.base, saveMetrics = TRUE)
+    head(nsv[which(nsv$nzv == TRUE),])  # quick peek into near zero veriability columns
+```
+
+```
+    ##                    freqRatio percentUnique zeroVar  nzv
+    ## kurtosis_yaw_belt          0   0.000000000    TRUE TRUE
+    ## skewness_yaw_belt          0   0.000000000    TRUE TRUE
+    ## amplitude_yaw_belt         0   0.006369832    TRUE TRUE
+    ## avg_roll_arm              66   1.643416778   FALSE TRUE
+    ## stddev_roll_arm           66   1.643416778   FALSE TRUE
+    ## var_roll_arm              66   1.643416778   FALSE TRUE
+```
+
+```r
+    sum(nsv$nzv == TRUE)                # nr of near zero veriability columns
+```
+
+```
+    ## [1] 34
+```
+
+```r
+    sum(nsv$nzv == FALSE)               # nr of remaining columns
+```
+
+```
+    ## [1] 123
+```
+
+```r
+    # Remove low variability columns from training and test too
+    nsv <- nearZeroVar(train.base, saveMetrics = FALSE)
+    train.nsv <- train.base[-nsv]
+    train.nsv <- train.base[-nsv]
+    xval.nsv <- xval.base[-nsv]
+    pmltest.nsv <- pmltest[-nsv]
+    
+    # Impute missing values for numeric columns (including the predicted 'classe' variable)
+    numcols <- which(lapply(train.nsv,class) %in% c("integer","numeric"))
+    preObj <- preProcess(train.nsv[,numcols], method=c("knnImpute"))
+    preObj
+```
+
+```
+    ## Created from 170 samples and 121 variables
+    ## 
+    ## Pre-processing:
+    ##   - centered (121)
+    ##   - ignored (0)
+    ##   - 5 nearest neighbor imputation (121)
+    ##   - scaled (121)
+```
+
+```r
+    # Apply the same standardisation to alll datasets
+    p.train <- predict(preObj, train.nsv[,numcols])
+    p.xval <- predict(preObj, xval.nsv[,numcols])
+    p.test <- predict(preObj, pmltest.nsv[,numcols])
+    
+    # Add back the non-numeric columns
+    train <- cbind.data.frame(p.train, train.nsv[,-numcols])
+    xval <- cbind.data.frame(p.xval, xval.nsv[,-numcols])
+    test <- cbind.data.frame(p.test, pmltest.nsv[,-numcols])
+```
+
+Brief review of the dimensions of the training, cross validation and test data:
+
+
+```r
+    dim(train)
+```
+
+```
+    ## [1] 15699   123
+```
+
+```r
+    dim(xval)
+```
+
+```
+    ## [1] 3923  123
+```
+
+```r
+    dim(test)
+```
+
+```
+    ## [1]  20 123
+```
+
+```r
+    # note 123rd coloumn in the test is the problem_id
+```
+
+
+# Modeling
+
+
+
+
+```r
+    modelFit1 <- randomForest(classe ~ . , data=train, method="class")
+    modelFit2 <- train(classe ~ ., data=train, method="lda")
+        
+    pred1 <- predict(modelFit1, newdata=xval)
+    pred2 <- predict(modelFit2, newdata=xval)
+    
+    # Compare accuracies
+    confusionMatrix(pred1, xval$classe)$overall[1]
+```
+
+```
+    ##  Accuracy 
+    ## 0.9979607
+```
+
+```r
+    confusionMatrix(pred2, xval$classe)$overall[1]
+```
+
+```
+    ##  Accuracy 
+    ## 0.7843487
+```
+
+```r
+    # Compare Confusion Matrices
+    table(pred1, xval$classe)
+```
+
+```
+    ##      
+    ## pred1    A    B    C    D    E
+    ##     A 1116    2    0    0    0
+    ##     B    0  757    2    0    0
+    ##     C    0    0  682    3    0
+    ##     D    0    0    0  640    1
+    ##     E    0    0    0    0  720
+```
+
+```r
+    table(pred2, xval$classe)
+```
+
+```
+    ##      
+    ## pred2   A   B   C   D   E
+    ##     A 987  82  37  35  20
+    ##     B  27 526  56  30  66
+    ##     C  54  99 541  97  57
+    ##     D  47  25  25 477  32
+    ##     E   1  27  25   4 546
+```
+
+
+# Results
+
+After data clean-up and preparation two model has been trained and tested. One with Random Forest and another with Linear Discriminant Analysis model. We can see that the cross validation accuracy is 99.8% and out-of-sample error is only 0.2% for the Random Forest model. This is significantly better than it is for the second model.
+As the Random Forest model performs so well we wont need further optimisation of the variables or the models and we expect that all or nearly all of the 20 test samples will be correctly classified.
+
+
+```r
+    testresults <- predict(modelFit1, test[c(1:122)]) 
+    testresults
+```
+
+```
+    ##  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 
+    ##  B  A  B  A  A  E  D  B  A  A  B  C  B  A  E  E  A  B  B  B 
+    ## Levels: A B C D E
+```
